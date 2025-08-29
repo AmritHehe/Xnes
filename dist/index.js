@@ -11,6 +11,7 @@ let priceBTC;
 await sub.subscribe('trades', (message) => {
     priceBTC = JSON.parse(message).price;
     // console.log(priceBTC)
+    //liquidisation ! will come here 
 });
 const client = new Client({
     user: "postgres",
@@ -19,13 +20,15 @@ const client = new Client({
     password: "Amrit123@",
     port: 5432,
 });
-let users = [{
-        username: "amrit",
-        email: "amritbarsiphone@gmail.com",
-        balance: 5959,
-        pass: "wow",
-        wallet: [{ orderId: 234234543453, coin: "sol ", quantity: 69, type: "buy", leverage: true, l: 2 }, { coin: "sol ", quantity: 69, type: "buy", leverage: false, l: 1 }]
-    }];
+//
+let users = new Map();
+users.set("amrit", {
+    username: "amrit",
+    email: "amritbarsiphone@gmail.com",
+    balance: 5959,
+    pass: "wow",
+    wallet: [{ orderId: 234234543453, coin: "sol ", quantity: 69, type: "buy", leverage: true, l: 2, orderType: "open", buyPrice: 200, sellPrice: 300 }, { orderId: 234303095343, coin: "sol ", quantity: 69, type: "buy", leverage: false, l: 1, orderType: "close", buyPrice: 300, sellPrice: 500 }]
+});
 async function start() {
     try {
         await client.connect();
@@ -43,15 +46,20 @@ app.post("/signup", (req, res) => {
     const username = req.body.username;
     const email = req.body.email;
     const pass = req.body.pass;
-    users.push({ username: username, email: email, balance: 5000, pass: pass, wallet: [] });
+    if (users.has(username)) {
+        return res.status(400).json({ error: "username already taken " });
+    }
+    if (username) {
+        users?.set(username, { username: username, email: email, balance: 5000, pass: pass, wallet: [] });
+    }
     res.json("signup done");
     console.log("new usser signed in " + JSON.stringify(users));
 });
 app.post("/signin", (req, res) => {
     const username = req.body.username;
     const pass = req.body.pass;
-    const user = users.find(user => user.username === username && user.pass === pass);
-    if (user) {
+    const user = users.get(username);
+    if (user && user.pass == pass) {
         const token = jwt.sign({
             username: user.username
         }, JWT_PASSWORD);
@@ -86,7 +94,7 @@ app.get("/balance", useMiddleware, (req, res) => {
     if (token) {
         const userDetails = jwt.verify(token, JWT_PASSWORD);
         const username = userDetails.username;
-        const user = users.find(user => user.username === username);
+        const user = users.get(username);
         let balance = user?.balance;
         res.json({ "balance": balance });
     }
@@ -100,7 +108,7 @@ app.post("/order/open", useMiddleware, async (req, res) => {
     const token = req.headers.authorization;
     const payload = req.body;
     const orderid = Date.now();
-    console.log("payload" + payload.toString());
+    console.log("payload" + JSON.stringify(payload));
     //payload  { 
     // qty 
     // type 
@@ -109,30 +117,32 @@ app.post("/order/open", useMiddleware, async (req, res) => {
     if (token) {
         const userDetails = jwt.verify(token, JWT_PASSWORD);
         const username = userDetails.username;
-        let user;
-        let i = users.findIndex(u => u?.username === username);
-        user = users[i];
+        let user = users.get(username);
         if (user) {
+            console.log("user to milgya");
             let balance = user.balance;
             const qty = payload.qty;
             let totalprice = currentprice * qty;
             if (payload.type == "buy") {
+                console.log("yha tk bhi agya");
                 if (balance >= totalprice) {
-                    if (payload.leverage == 1) {
+                    if (!payload.leverage) {
                         balance -= totalprice;
                         //@ts-ignore
-                        users[i].balance = balance;
+                        user.balance = balance;
                         //@ts-ignore
-                        users[i].wallet.push({ coin: payload.asset, quantity: qty, type: "buy", leverage: false, l: 1, orderid: orderid });
+                        user.wallet.push({ coin: payload.asset, quantity: qty, type: "buy", leverage: false, l: 1, orderId: orderid, orderType: "open", buyPrice: totalprice });
+                        users.set(username, user);
                     }
-                    else if (payload.leverage > 1 && payload.leverage <= 100) {
-                        const leverage = payload.leverage;
+                    else if (payload.leverage) {
+                        const leverage = payload.l;
                         balance -= totalprice;
                         //@ts-ignore
-                        users[i].balance = balance;
+                        user.balance = balance;
                         const leveragedPrice = currentprice * qty * leverage;
                         //@ts-ignore
-                        users[i].wallet.push({ coin: payload.asset, quantity: qty, type: "buy", leverage: true, l: leverage, lp: leveragedPrice, orderid: orderid });
+                        user.wallet.push({ coin: payload.asset, quantity: qty, type: "buy", leverage: true, l: leverage, buyLeveragedPrice: leveragedPrice, orderId: orderid, orderType: "open", buyPrice: totalprice });
+                        users.set(username, user);
                     }
                     else {
                         return res.json("good dev if you are here");
@@ -143,28 +153,39 @@ app.post("/order/open", useMiddleware, async (req, res) => {
                 }
             }
             else if (payload.type == "sell") {
-                let orderid = payload.orderId;
-                //@ts-ignore
-                if (!users[i]?.wallet[orderid]?.leverage) {
+                const orderid = payload.orderId;
+                const order = user.wallet.find(o => o.orderId === orderid);
+                console.log("found the order" + order);
+                if (!order?.leverage) {
                     balance += totalprice;
                     //@ts-ignore
-                    users[i].balance = balance;
-                    users[i]?.wallet.pop();
+                    user.balance = balance;
+                    order.orderType = "closed";
+                    order.sellPrice = totalprice;
+                    users.set(username, user);
                 }
-                //@ts-ignore
-                else if (users[i]?.wallet[orderid]?.leverage == true) {
-                    //@ts-ignore
-                    let buyleveragedPrice = users[i]?.wallet[orderid]?.leveragedPrice;
-                    //@ts-ignore
-                    let leverage = users[i]?.wallet[orderid]?.l;
-                    let sellingleveragedPrice = currentprice * qty * leverage;
-                    let currentvalue = sellingleveragedPrice - buyleveragedPrice;
-                    balance = balance + totalprice + currentvalue;
+                else if (order?.leverage) {
+                    let buyPrice = order.buyPrice;
+                    let buyleveragedPrice = order.buyLeveragedPrice;
+                    if (buyleveragedPrice) {
+                        let leverage = order.l;
+                        let sellingleveragedPrice = currentprice * qty * leverage;
+                        let currentvalue = sellingleveragedPrice - buyleveragedPrice;
+                        balance = balance + currentvalue + payload.buyPrice;
+                        order.soldLeveragedPrice = sellingleveragedPrice;
+                        user.balance = balance;
+                        order.orderType = "closed";
+                        order.sellPrice = totalprice;
+                        users.set(username, user);
+                    }
+                    else {
+                        console.log("some error happened");
+                    }
                 }
             }
             //@ts-ignore
-            console.log(users[i]);
-            res.json("trade executed successfully  balance remaining " + users[i]?.balance + " wallet " + JSON.stringify(users[i]?.wallet) + "order total price" + totalprice);
+            console.log(users);
+            res.json("trade executed successfully  balance remaining " + user.balance + " wallet " + JSON.stringify(user.wallet) + "order total price" + totalprice);
         }
     }
     //update the balance of user , update the wallet , show that you bought the trade on frontend
